@@ -1,0 +1,172 @@
+#include <Wire.h>
+#include <Adafruit_LiquidCrystal.h>
+
+const int trigPin   = 8;
+const int echoPin   = 7;
+const int lightPin  = A0;
+const int buttonPin = 2;
+const int ledPin    = 3;
+const int buzzerPin = 6;
+
+Adafruit_LiquidCrystal lcd(0);
+
+const int LIGHT_THRESHOLD          = 512;
+const float DISTANCE_THRESHOLD_CM  = 100.0;
+const unsigned long WRECK_TIME_MS  = 5000;
+
+enum ShipState { OPEN_SEA, ANCHOR_DROPPED, STORM, CHARYBDIS, WRECKED };
+ShipState currentState = OPEN_SEA;
+
+bool anchorDropped = false;
+unsigned long dangerStartTime = 0;
+
+unsigned long lastBlink = 0;
+const unsigned long BLINK_INTERVAL_MS = 300;
+bool ledOn = false;
+
+int lastButtonReading  = HIGH;
+int stableButtonState  = HIGH;
+unsigned long lastDebounceTime = 0;
+const unsigned long DEBOUNCE_DELAY_MS = 50;
+
+ShipState lastDisplayedState;
+bool firstLoop = true;
+
+void setup() {
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(buttonPin, INPUT_PULLUP);
+  pinMode(ledPin, OUTPUT);
+  pinMode(buzzerPin, OUTPUT);
+
+  Serial.begin(9600);
+
+  lcd.begin(16, 2);
+  lcd.setBacklight(HIGH);
+  lcd.print("OPEN SEA");
+}
+
+void loop() {
+  handleButton();
+
+  if (currentState != ANCHOR_DROPPED && currentState != WRECKED) {
+    evaluateSensorsAndTransition();
+  }
+
+  updateOutputs();
+  updateDisplay();
+}
+
+void handleButton() {
+  int reading = digitalRead(buttonPin);
+
+  if (reading != lastButtonReading) {
+    lastDebounceTime = millis();
+  }
+
+  if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY_MS) {
+    if (reading != stableButtonState) {
+      stableButtonState = reading;
+
+      if (stableButtonState == LOW && currentState != WRECKED) {
+        anchorDropped = !anchorDropped;
+
+        if (anchorDropped) {
+          currentState = ANCHOR_DROPPED;
+        } else {
+          currentState = OPEN_SEA;
+          evaluateSensorsAndTransition();
+        }
+      }
+    }
+  }
+
+  lastButtonReading = reading;
+}
+
+void evaluateSensorsAndTransition() {
+  int lightVal   = analogRead(lightPin);
+  float distVal  = readDistanceCm();
+  bool stormNow     = (lightVal < LIGHT_THRESHOLD);
+  bool charybdisNow = (distVal < DISTANCE_THRESHOLD_CM);
+
+  Serial.print("Light: ");
+  Serial.print(lightVal);
+  Serial.print(" | Distance: ");
+  Serial.print(distVal);
+  Serial.println(" cm");
+
+  switch (currentState) {
+    case OPEN_SEA:
+      if (stormNow) {
+        currentState = STORM;
+        dangerStartTime = millis();
+      } else if (charybdisNow) {
+        currentState = CHARYBDIS;
+        dangerStartTime = millis();
+      }
+      break;
+
+    case STORM:
+      if (!stormNow) {
+        currentState = OPEN_SEA;
+      } else if (millis() - dangerStartTime >= WRECK_TIME_MS) {
+        currentState = WRECKED;
+      }
+      break;
+
+    case CHARYBDIS:
+      if (!charybdisNow) {
+        currentState = OPEN_SEA;
+      } else if (millis() - dangerStartTime >= WRECK_TIME_MS) {
+        currentState = WRECKED;
+      }
+      break;
+
+    default:
+      break;
+  }
+}
+
+float readDistanceCm() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 30000);
+  if (duration == 0) return 9999;
+  return duration * 0.034 / 2.0;
+}
+
+void updateOutputs() {
+  if (currentState == STORM) {
+    if (millis() - lastBlink >= BLINK_INTERVAL_MS) {
+      lastBlink = millis();
+      ledOn = !ledOn;
+      digitalWrite(ledPin, ledOn ? HIGH : LOW);
+    }
+  } else {
+    digitalWrite(ledPin, LOW);
+    ledOn = false;
+  }
+
+  digitalWrite(buzzerPin, (currentState == CHARYBDIS) ? HIGH : LOW);
+}
+
+void updateDisplay() {
+  if (!firstLoop && currentState == lastDisplayedState) return;
+  firstLoop = false;
+  lastDisplayedState = currentState;
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  switch (currentState) {
+    case OPEN_SEA:       lcd.print("OPEN SEA");       break;
+    case ANCHOR_DROPPED: lcd.print("ANCHOR DROPPED"); break;
+    case STORM:          lcd.print("STORM");          break;
+    case CHARYBDIS:      lcd.print("CHARYBDIS");      break;
+    case WRECKED:        lcd.print("WRECKED");        break;
+  }
+}
